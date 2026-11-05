@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Local configuration, logs, and secrets
+.env
+*.log
+logs/
+/settings*.json
+*.tmp
+
+# Editors and OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Private game screenshots, button crops, and design drafts: never publish
+assests/
+screenshots/
+
+# Release archives and local tool settings
+*.zip
+.claude/
+.DS_Store

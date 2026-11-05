@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loop-monitor"
+dynamic = ["version"]
+description = "Screen-based UI recognition and session monitoring for Windows, with a safe local demo environment."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "LOOP contributors" }]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+]
+dependencies = [
+    "PySide6-Essentials>=6.7,<7",
+    "opencv-python-headless>=4.9,<6",
+    "numpy>=1.26,<3",
+    "mss>=10.1,<11",
+    "PyAutoGUI>=0.9.54,<0.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-qt>=4.4,<5", "ruff>=0.6,<1"]
+build = ["pyinstaller>=6.6,<7"]
+
+[project.gui-scripts]
+loop = "loop.app:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "loop.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["loop*"]
+
+[tool.setuptools.package-data]
+loop = ["assets/*.png", "assets/*.ico", "assets/demo/*/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyside6"
+markers = ["desktop: uses the real screen, real windows, or real key events (run with LOOP_DESKTOP_TESTS=1)"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP", "SIM", "N"]
+ignore = ["N802", "N818"]  # Qt override names; exception names read better without an Error suffix here
