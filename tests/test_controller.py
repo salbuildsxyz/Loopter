@@ -8,13 +8,13 @@ import pytest
 from loop.capture import CaptureError, Region
 from loop.config import Mode, Settings, TemplateEntry
 from loop.controller import SessionController, SetupError, build_plan, describe_event
-from loop.demo import demo_template_path
 from loop.input_guard import ClickTarget, InputGuard
 from loop.policy import Event, EventKind
 from loop.screens import ACTIONABLE, Screen
 from loop.state import SessionState
 from loop.worker import ScanPlan
 from tests.conftest import DEMO_ORIGIN, ScenarioCapture
+from tests.simulation import demo_template_path
 
 MONITORS = [Region(0, 0, 1920, 1080), Region(1920, 0, 2560, 1440)]
 
@@ -91,12 +91,12 @@ def test_stale_worker_signals_are_ignored(qtbot, controller):
 
 def test_setup_error_moves_to_error_state():
     def fail():
-        raise SetupError("No usable templates")
+        raise SetupError("No buttons are set up yet")
 
     controller = SessionController(InputGuard(click=lambda x, y: None), fail)
     controller.start()
     assert controller.state is SessionState.ERROR
-    assert controller.last_error == "No usable templates"
+    assert controller.last_error == "No buttons are set up yet"
 
 
 def test_repeated_capture_failures_end_in_error(qtbot, demo_guard, templates):
@@ -141,9 +141,8 @@ def live(mode=Mode.LIVE, **overrides):
 
 
 def test_live_monitor_never_interacts(user_templates):
-    guard = InputGuard(click=lambda x, y: None)
-    settings = live(templates=user_templates, demo_clicks_enabled=True)
-    plan = build_plan(settings, guard, MONITORS)
+    settings = live(templates=user_templates)
+    plan = build_plan(settings, MONITORS)
     assert not plan.interacts
     assert plan.click_target is None
     assert plan.display_height == 1080
@@ -151,7 +150,7 @@ def test_live_monitor_never_interacts(user_templates):
 
 def test_live_interaction_plan(user_templates):
     settings = live(Mode.INTERACTION, templates=user_templates, region=Region(2000, 100, 800, 600))
-    plan = build_plan(settings, InputGuard(click=lambda x, y: None), MONITORS)
+    plan = build_plan(settings, MONITORS)
     assert plan.actions == frozenset(ACTIONABLE)
     assert plan.click_target == ClickTarget(Region(2000, 100, 800, 600), require_user_idle=True)
     assert plan.display_height == 1440
@@ -159,9 +158,7 @@ def test_live_interaction_plan(user_templates):
 
 def test_live_interaction_warns_about_actions_without_templates(caplog, user_templates):
     caplog.set_level(logging.WARNING)
-    build_plan(
-        live(Mode.INTERACTION, templates=user_templates), InputGuard(click=lambda x, y: None), MONITORS
-    )
+    build_plan(live(Mode.INTERACTION, templates=user_templates), MONITORS)
     assert "No usable template for 'Play Again'" in caplog.text
     assert "No usable template for 'Play'" not in caplog.text
 
@@ -169,7 +166,7 @@ def test_live_interaction_warns_about_actions_without_templates(caplog, user_tem
 def test_missing_templates_are_skipped_with_warning(caplog, tmp_path, user_templates):
     caplog.set_level(logging.WARNING)
     entries = [*user_templates, TemplateEntry(str(tmp_path / "gone.png"), Screen.RESULTS)]
-    plan = build_plan(live(templates=entries), InputGuard(click=lambda x, y: None), MONITORS)
+    plan = build_plan(live(templates=entries), MONITORS)
     assert set(plan.templates) == {Screen.LOBBY, Screen.MATCHMAKING}
     assert "Skipping template" in caplog.text
 
@@ -177,23 +174,22 @@ def test_missing_templates_are_skipped_with_warning(caplog, tmp_path, user_templ
 @pytest.mark.parametrize(
     "settings, message",
     [
-        (Settings(mode=Mode.LIVE), "No usable templates"),
-        (live(), "No usable templates"),
-        (live(templates=[TemplateEntry("C:/nowhere/gone.png", Screen.LOBBY)]), "No usable templates"),
+        (Settings(mode=Mode.LIVE), "No buttons are set up yet"),
+        (live(), "No buttons are set up yet"),
+        (live(templates=[TemplateEntry("C:/nowhere/gone.png", Screen.LOBBY)]), "No buttons are set up yet"),
         (live(region=Region(10**6, 0, 200, 200)), "not fully inside"),
         (live(region=Region(0, 0, 8, 8)), "too small"),
-        (Settings(mode=Mode.DEMO), "demo target window is not open"),
     ],
 )
 def test_incorrect_configuration_is_reported(settings, message):
     with pytest.raises(SetupError, match=message):
-        build_plan(settings, InputGuard(click=lambda x, y: None), MONITORS)
+        build_plan(settings, MONITORS)
 
 
 @pytest.mark.parametrize("monitor, expected", [(1, 0), (2, 1), (9, 1)])
 def test_without_a_region_the_whole_selected_display_is_scanned(user_templates, monitor, expected):
     settings = live(Mode.INTERACTION, templates=user_templates, region=None, monitor=monitor)
-    plan = build_plan(settings, InputGuard(click=lambda x, y: None), MONITORS)
+    plan = build_plan(settings, MONITORS)
     assert plan.region() == MONITORS[expected]
     assert plan.click_target.region == MONITORS[expected]
     assert plan.display_height == MONITORS[expected].height
@@ -201,22 +197,13 @@ def test_without_a_region_the_whole_selected_display_is_scanned(user_templates, 
 
 def test_no_connected_display_is_reported(user_templates):
     with pytest.raises(SetupError, match="No display"):
-        build_plan(live(templates=user_templates, region=None), InputGuard(click=lambda x, y: None), [])
+        build_plan(live(templates=user_templates, region=None), [])
 
 
 def test_live_plans_mask_loops_own_windows(user_templates):
     own = [Region(0, 0, 10, 10)]
-    plan = build_plan(
-        live(templates=user_templates), InputGuard(click=lambda x, y: None), MONITORS, lambda: own
-    )
+    plan = build_plan(live(templates=user_templates), MONITORS, lambda: own)
     assert plan.masked() == own
-
-
-def test_demo_plan_clicks_only_when_allowed(demo_guard):
-    assert not build_plan(Settings(mode=Mode.DEMO), demo_guard, MONITORS).interacts
-    allowed = build_plan(Settings(mode=Mode.DEMO, demo_clicks_enabled=True), demo_guard, MONITORS)
-    assert allowed.actions == frozenset(ACTIONABLE)
-    assert allowed.region() == DEMO_ORIGIN
 
 
 @pytest.mark.parametrize("kind", list(EventKind))
@@ -231,14 +218,13 @@ def test_templates_saved_for_the_wrong_screen_block_the_session(tmp_path, user_t
     path.write_bytes(demo_template_path(Screen.LOBBY).read_bytes())
     entries = [*user_templates, TemplateEntry(str(path), Screen.RESULTS, 540)]
     with pytest.raises(SetupError, match="saved for the wrong screen"):
-        build_plan(live(templates=entries), InputGuard(click=lambda x, y: None), MONITORS)
+        build_plan(live(templates=entries), MONITORS)
 
 
 def test_live_interaction_needs_something_to_press(tmp_path):
     path = tmp_path / "loading.png"
     path.write_bytes(demo_template_path(Screen.LOADING).read_bytes())
     waiting_only = [TemplateEntry(str(path), Screen.LOADING, 540)]
-    guard = InputGuard(click=lambda x, y: None)
     with pytest.raises(SetupError, match="nothing it could press"):
-        build_plan(live(Mode.INTERACTION, templates=waiting_only), guard, MONITORS)
-    assert not build_plan(live(templates=waiting_only), guard, MONITORS).interacts  # monitoring is fine
+        build_plan(live(Mode.INTERACTION, templates=waiting_only), MONITORS)
+    assert not build_plan(live(templates=waiting_only), MONITORS).interacts  # monitoring is fine

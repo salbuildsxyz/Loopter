@@ -1,40 +1,73 @@
-"""Main window: a compact session screen with Setup, Settings, and Activity behind it."""
+"""The main window: tabs for Home, Setup, Activity, and Settings, plus first-time setup.
+
+The window owns the real session controller, template library, and emergency stop. It
+mirrors their state into a ViewState that every page renders, so the interface only ever
+shows what the application actually knows.
+"""
 
 from __future__ import annotations
 
+import ctypes
 import logging
-from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QCloseEvent, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QShortcut
-from PySide6.QtWidgets import QFrame, QLabel, QMainWindow, QScrollArea, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QCloseEvent,
+    QDesktopServices,
+    QGuiApplication,
+    QIcon,
+    QKeySequence,
+    QShortcut,
+)
+from PySide6.QtWidgets import QFileDialog, QMainWindow, QVBoxLayout, QWidget
 
-from loop import win32
-from loop.capture import CaptureError, Region, display_for, list_monitors
-from loop.config import Mode, Settings, app_data_dir, save_settings, templates_dir
+from loop import DISPLAY_NAME, win32
+from loop.capture import Region
+from loop.config import Mode, Settings, app_data_dir, logs_dir, save_settings, templates_dir
 from loop.controller import SessionController, build_plan
-from loop.demo import SCREEN_SIZE
-from loop.demo.target_window import DemoTargetWindow
 from loop.hotkey import GlobalHotkey, HotkeyError
 from loop.input_guard import InputGuard
 from loop.logging_setup import LogBridge
-from loop.screens import Button
-from loop.state import SessionState
-from loop.templates import TemplateLibrary
-from loop.ui import icons, theme
-from loop.ui.activity_view import ActivityView
-from loop.ui.interaction_dialog import confirm_live_interaction
-from loop.ui.session_view import SessionView
-from loop.ui.settings_view import SettingsView
-from loop.ui.setup_view import SetupView
-from loop.ui.widgets import IconButton, SegmentedControl, label, row
+from loop.matcher import TemplateError
+from loop.recognizer import Observation
+from loop.screens import Screen
+from loop.state import SessionState, SessionStats
+from loop.templates import PROFILE_FILE, TemplateLibrary
+from loop.ui import motion, screenshot, theme
+from loop.ui.activity import ActivityPage
+from loop.ui.capture_card import CaptureCard
+from loop.ui.check_card import CheckCard
+from loop.ui.home import HomePage
+from loop.ui.model import Check, CheckOutcome, Target, ViewState, saved_targets, short_clock
+from loop.ui.onboarding import BUTTONS, DISPLAY, Onboarding
+from loop.ui.overlay import AutoClickDialog, ToastHost
+from loop.ui.screenshot import Display
+from loop.ui.settings_page import SettingsPage
+from loop.ui.setup_page import SetupPage
+from loop.ui.tabs import TabBar
 
 log = logging.getLogger(__name__)
 
 SAVE_DELAY_MS = 400
-DEMO_START_DELAY_MS = 200
-ATTENTION_LEVELS = {"WARNING": theme.WARN, "ERROR": theme.ERR, "CRITICAL": theme.ERR}
+FLASH_MS = 2400
+PAGES = ("home", "setup", "activity", "settings")
+HOME, SETUP, ACTIVITY, SETTINGS = range(len(PAGES))
+
+
+class Root(QWidget):
+    """The window background; it keeps its floating layers the same size as itself."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("Root")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self.layers: list[QWidget] = []
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        for layer in self.layers:
+            layer.setGeometry(self.rect())
 
 
 class MainWindow(QMainWindow):
@@ -42,69 +75,85 @@ class MainWindow(QMainWindow):
 
     def __init__(self, settings: Settings, bridge: LogBridge, icon: QIcon) -> None:
         super().__init__()
-        self.setWindowTitle("LOOP")
+        self.setWindowTitle(DISPLAY_NAME)
         self.setWindowIcon(icon)
         self.settings = settings
+        motion.settings().set_user_preference(settings.reduce_motion)
+        self.view = ViewState(mode=Mode.LIVE, hotkey=settings.emergency_hotkey)
         self.guard = InputGuard()
         self.controller = SessionController(
-            self.guard, lambda: build_plan(self.settings, self.guard, own_windows=self._own_windows())
+            self.guard, lambda: build_plan(self.settings, own_windows=self._own_windows())
         )
         self.library = TemplateLibrary(templates_dir(), settings.templates)
-        self._log_templates()
         self.hotkey = GlobalHotkey(self._on_hotkey_pressed)
-        self.demo_window: DemoTargetWindow | None = None
-        self._emergency = False
+        self.displays: list[Display] = screenshot.list_displays()
+        if not settings.onboarding_done and settings.onboarding_step == 0:
+            # A first launch starts on the primary display.
+            primary = screenshot.default_display(self.displays)
+            if primary is not None:
+                settings.monitor = primary.number
+        self._log_templates()
 
         self._save_timer = QTimer(self, singleShot=True, interval=SAVE_DELAY_MS)
         self._save_timer.timeout.connect(self._save)
         self._display_timer = QTimer(self, singleShot=True, interval=500)
         self._display_timer.timeout.connect(self._on_displays_changed)
         self._elapsed_timer = QTimer(self, interval=250)
-        self._elapsed_timer.timeout.connect(lambda: self.session.set_elapsed(self.controller.elapsed()))
+        self._elapsed_timer.timeout.connect(self._tick)
+        self._flash_timer = QTimer(self, singleShot=True, interval=FLASH_MS)
+        self._flash_timer.timeout.connect(self._clear_flash)
 
+        self._onboarding_open = False
         self._build()
         self._connect(bridge)
         self._load_state()
 
-    def _build(self) -> None:
-        self.settings_button = IconButton("gear", "Settings and activity", self.show_settings)
-        brand = QLabel()
-        brand.setPixmap(icons.brand(20))
-        title = QWidget()
-        title.setObjectName("TitleStrip")
-        title.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
-        title.setLayout(
-            row(brand, label("LOOP", "Wordmark"), None, self.settings_button, margins=(14, 8, 10, 8))
+    # Construction
+
+    def _cards(self, primary: bool) -> tuple[CaptureCard, CheckCard]:
+        capture = CaptureCard(self.library, self.display, self.saved_targets)
+        check = CheckCard(
+            self.settings, self.library, self.view.checks, self.display, self.saved_targets, primary=primary
         )
+        return capture, check
 
-        self.session = SessionView()
-        self.setup = SetupView(self.settings, self.library)
-        self.settings_view = SettingsView(self.settings, self.library)
-        self.activity = ActivityView()
+    def saved_targets(self) -> set[Target]:
+        return self.view.saved
 
-        self.tabs = SegmentedControl([("settings", "Settings", ""), ("activity", "Activity", "")])
-        self.tabs.setAccessibleName("Settings sections")
-        self.tabs.selected.connect(self._show_tab)
-        self.settings_pages = QStackedWidget()
-        self.settings_pages.addWidget(_scrolling(self.settings_view))
-        self.settings_pages.addWidget(self.activity)
-
-        self.stack = QStackedWidget()
-        self.stack.addWidget(self.session)
-        self.stack.addWidget(_page(self._back_button(), label("Setup", "Title"), body=self.setup))
-        self.stack.addWidget(_page(self._back_button(), self.tabs, body=self.settings_pages))
-
-        root = QWidget()
-        layout = QVBoxLayout(root)
+    def _build(self) -> None:
+        self.root = Root()
+        layout = QVBoxLayout(self.root)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(title)
-        layout.addWidget(self.stack, 1)
-        self.setCentralWidget(root)
-        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self.show_main)
+        self.tabs = TabBar([name.title() for name in PAGES])
+        self.tabs.picked.connect(self.go)
+        layout.addWidget(self.tabs)
 
-    def _back_button(self) -> IconButton:
-        return IconButton("back", "Back to session", self.show_main)
+        self.home = HomePage()
+        setup_capture, setup_check = self._cards(primary=False)
+        self.setup = SetupPage(self.settings, self.library, setup_capture, setup_check)
+        self.activity = ActivityPage()
+        self.settings_page = SettingsPage(self.settings)
+        self.stack = motion.AnimatedStack()
+        for page in (self.home, self.setup, self.activity, self.settings_page):
+            self.stack.addWidget(page)
+        layout.addWidget(self.stack, 1)
+        self.shell = [self.tabs, self.stack]
+
+        onboarding_capture, onboarding_check = self._cards(primary=True)
+        self.onboarding = Onboarding(onboarding_capture, onboarding_check)
+        self.onboarding.setParent(self.root)
+        self.onboarding.hide()
+        self.dialog = AutoClickDialog(self.root)
+        self.toasts = ToastHost(self.root)
+        self.root.layers = [self.onboarding, self.dialog, self.toasts]
+        self.setCentralWidget(self.root)
+        self.captures = (setup_capture, onboarding_capture)
+        self.checks = (setup_check, onboarding_check)
+
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self._escape)
+        for number in range(1, len(PAGES) + 1):
+            QShortcut(QKeySequence(f"Ctrl+{number}"), self, lambda n=number - 1: self._shortcut(n))
 
     def _connect(self, bridge: LogBridge) -> None:
         for entry in bridge.history:
@@ -113,36 +162,59 @@ class MainWindow(QMainWindow):
 
         c = self.controller
         c.state_changed.connect(self._on_state)
-        c.stats_changed.connect(self.session.set_stats)
-        c.observed.connect(self.session.set_observation)
+        c.stats_changed.connect(self._on_stats)
+        c.observed.connect(self._on_observed)
 
-        s = self.session
-        s.start_requested.connect(self._start)
-        s.pause_requested.connect(c.pause)
-        s.resume_requested.connect(c.resume)
-        s.stop_requested.connect(c.stop)
-        s.mode_selected.connect(self._select_mode)
-        s.setup_requested.connect(self.show_setup)
-        s.activity_requested.connect(self.show_activity)
+        h = self.home
+        h.start_requested.connect(self.start_session)
+        h.pause_requested.connect(c.pause)
+        h.resume_requested.connect(c.resume)
+        h.stop_requested.connect(self.stop_session)
+        h.mode_picked.connect(self.pick_mode)
+        h.open_requested.connect(self.open)
 
-        v = self.settings_view
+        self.dialog.accepted.connect(self._auto_click_confirmed)
+        self.dialog.rejected.connect(self._auto_click_declined)
+
+        for capture in self.captures:
+            capture.saved.connect(lambda target, card=capture: self._on_saved(target, card))
+        self.captures[0].display_requested.connect(lambda: self.go(SETTINGS))
+        self.captures[1].display_requested.connect(lambda: self.onboarding.show_step(DISPLAY))
+        for check in self.checks:
+            check.checked.connect(self._on_checked)
+        self.checks[0].recapture.connect(self.open_setup_for)
+        self.checks[1].recapture.connect(self._recapture_in_onboarding)
+
+        s = self.setup
+        s.region_selected.connect(self._set_region)
+        s.templates_changed.connect(self._templates_changed)
+        s.onboarding_requested.connect(lambda: self.show_onboarding(0))
+        s.message.connect(self.toast)
+
+        a = self.activity
+        a.home_requested.connect(lambda: self.go(HOME))
+        a.open_folder_requested.connect(lambda: _open_folder(logs_dir()))
+        a.message.connect(self.toast)
+
+        v = self.settings_page
+        v.display_changed.connect(self._pick_display)
+        v.reduce_motion_changed.connect(self._set_reduce_motion)
         v.threshold_changed.connect(lambda value: self._update(threshold=value))
         v.interval_changed.connect(lambda value: self._update(scan_interval_ms=value))
-        v.cooldown_changed.connect(lambda value: self._update(cooldown_s=value))
         v.actions_changed.connect(lambda value: self._update(actions=value))
-        v.demo_clicks_toggled.connect(self._set_demo_clicks)
-        v.hotkey_submitted.connect(self._apply_hotkey)
-        v.monitor_changed.connect(lambda: self._monitor_changed(self.setup))
-        v.clear_region_requested.connect(lambda: self._set_region(None))
-        v.setup_requested.connect(self.show_setup)
-        v.templates_changed.connect(self._templates_changed)
+        v.cooldown_changed.connect(lambda value: self._update(cooldown_s=value))
+        v.hotkey_recorded.connect(self.apply_hotkey)
+        v.import_requested.connect(self._import_profile)
+        v.export_requested.connect(self._export_profile)
+        v.data_folder_requested.connect(lambda: _open_folder(app_data_dir()))
+        v.onboarding_requested.connect(lambda: self.show_onboarding(0))
+        v.message.connect(self.toast)
 
-        self.setup.region_selected.connect(self._set_region)
-        self.setup.templates_changed.connect(self._templates_changed)
-        self.setup.monitor_changed.connect(lambda: self._monitor_changed(self.settings_view))
-        self.setup.done.connect(self.show_main)
-
-        self.activity.open_folder_requested.connect(lambda: _open_folder(app_data_dir()))
+        o = self.onboarding
+        o.finished.connect(self._finish_onboarding)
+        o.deferred.connect(self._defer_onboarding)
+        o.step_changed.connect(self._onboarding_step)
+        o.display_picked.connect(self._pick_display)
 
         self.emergency_triggered.connect(self._on_emergency)
         app = QGuiApplication.instance()
@@ -153,151 +225,393 @@ class MainWindow(QMainWindow):
 
     def _load_state(self) -> None:
         s = self.settings
-        self.setMinimumSize(theme.WINDOW_WIDTH, theme.WINDOW_HEIGHT)
+        self.setMinimumSize(theme.MIN_WIDTH, theme.MIN_HEIGHT)
         if s.window_geometry:
-            # Keep the position the window had; it always opens at its compact size.
+            # Keep the position the window had; it always opens at its regular size.
             self.restoreGeometry(QByteArray.fromBase64(s.window_geometry.encode()))
             self.setWindowState(Qt.WindowState.WindowNoState)
-        self.resize(theme.WINDOW_WIDTH, theme.WINDOW_HEIGHT)
-        self.settings_view.load()
-        self._set_mode(s.mode, announce=False)
-        self._on_state(self.controller.state)
-        self._refresh_profile()
+        height = theme.WINDOW_HEIGHT
+        if (screen := self.screen()) is not None:
+            height = max(theme.MIN_HEIGHT, min(height, screen.availableGeometry().height() - 48))
+        self.resize(theme.WINDOW_WIDTH, height)
+        self.settings_page.load(self.displays)
+        self.settings_page.set_displays(self.displays)
+        self.onboarding.set_displays(self.displays, s.monitor)
         self._register_hotkey(s.emergency_hotkey)
+        self._refresh_saved()
+        self.go(HOME, animate=False)
+        if self.needs_onboarding():
+            self.show_onboarding(s.onboarding_step, animate=False)
+
+    def needs_onboarding(self) -> bool:
+        return not self.settings.onboarding_done and not self.library.usable_buttons()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        _tint_title_bar(int(self.winId()))
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if event.type() == QEvent.Type.WindowStateChange:
+            self.home.set_ambient_allowed(not self.isMinimized())
+        super().changeEvent(event)
+
+    # Rendering
+
+    def render(self) -> None:
+        view = self.view
+        view.checks.sync(view.saved)
+        self.home.render(view)
+        self.setup.render(view)
+        self.settings_page.render(view)
+        self.onboarding.render(view)
+        for capture in self.captures:
+            if capture.phase not in ("loading", "confirm"):
+                capture.render()
+        for check in self.checks:
+            check.refresh()
+        self.tabs.set_flag(SETUP, "warn" if self._setup_needs_attention() else "")
+        self._update_title()
+
+    def _setup_needs_attention(self) -> bool:
+        return Target.PLAY not in self.view.saved or any(
+            c is Check.ADJUST for c in self.view.checks.statuses.values()
+        )
+
+    def _update_title(self) -> None:
+        view = self.view
+        if view.active:
+            state = (
+                "Paused"
+                if view.session is SessionState.PAUSED
+                else "Auto clicking"
+                if view.mode is Mode.INTERACTION
+                else "Watching"
+            )
+            title = f"{DISPLAY_NAME} · {state} · {short_clock(view.elapsed)}"
+        else:
+            title = DISPLAY_NAME
+        if self.windowTitle() != title:
+            self.setWindowTitle(title)
+
+    def _refresh_saved(self) -> None:
+        """Re-reads which buttons have a usable picture (this loads the files, so not on every frame)."""
+        self.view.saved = saved_targets(self.library.usable_buttons())
+        self.render()
+
+    def toast(self, message: str, kind: str = "info") -> None:
+        self.toasts.show_message(message, kind)
 
     # Navigation
 
-    def show_main(self) -> None:
-        self.stack.setCurrentIndex(0)
+    @property
+    def page(self) -> int:
+        return -1 if self.onboarding_open else self.stack.currentIndex()
 
-    def show_setup(self) -> None:
-        self.setup.refresh_monitors()
-        self.stack.setCurrentIndex(1)
+    @property
+    def onboarding_open(self) -> bool:
+        return self._onboarding_open
 
-    def show_settings(self) -> None:
-        self.stack.setCurrentIndex(2)
-        self._show_tab(self.tabs.value() or "settings")
+    def go(self, page: int, animate: bool = True) -> None:
+        if self.onboarding_open:
+            self._close_onboarding()
+        if animate:
+            self.stack.setCurrentIndex(page)
+        else:
+            self.stack.jump(page)
+        self.tabs.set_current(page, animate)
+        if page == ACTIVITY:
+            self.tabs.set_flag(ACTIVITY, "")
 
-    def show_activity(self) -> None:
-        self.stack.setCurrentIndex(2)
-        self._show_tab("activity")
+    def open(self, name: str) -> None:
+        """Follows a link from Home: a page, the check, or a button to capture."""
+        if name in (t.value for t in Target):
+            self.open_setup_for(Target(name))
+        elif name == "again":
+            self.open_setup_for(Target.AGAIN)
+        elif name == "check":
+            self.go(SETUP)
+            self.setup.show_check()
+        else:
+            self.go({"setup": SETUP, "settings": SETTINGS, "activity": ACTIVITY}.get(name, HOME))
 
-    def _show_tab(self, tab: str) -> None:
-        self.tabs.set_value(tab)
-        self.settings_pages.setCurrentIndex(0 if tab == "settings" else 1)
-        if tab == "activity":
-            self.settings_button.set_badge("")
+    def open_setup_for(self, target: Target) -> None:
+        if target is Target.PLAY and Target.PLAY not in self.view.saved and self.page == HOME:
+            self.show_onboarding(BUTTONS)
+            return
+        self.go(SETUP)
+        self.setup.capture_target(target)
 
-    def _on_record(self, timestamp: str, level: str, message: str) -> None:
-        self.activity.append(timestamp, level, message)
-        color = ATTENTION_LEVELS.get(level)
-        if color and not self._viewing_activity() and self.settings_button.badge != theme.ERR:
-            self.settings_button.set_badge(color)
+    def show_onboarding(self, step: int = 0, animate: bool = True) -> None:
+        if self.view.active:
+            self.toast("Stop the session before running setup.", "info")
+            return
+        self._onboarding_open = True
+        self.onboarding.setGeometry(self.root.rect())
+        self.onboarding.raise_()
+        self.toasts.raise_()
+        for widget in self.shell:
+            widget.setEnabled(False)
+        self.toasts.set_bottom(72)
+        self.onboarding.start(step)
+        if animate:
+            motion.fade(self.onboarding, True)
+        else:
+            self.onboarding.show()
 
-    def _viewing_activity(self) -> bool:
-        return self.stack.currentIndex() == 2 and self.settings_pages.currentWidget() is self.activity
+    def _close_onboarding(self) -> None:
+        self._onboarding_open = False
+        for widget in self.shell:
+            widget.setEnabled(True)
+        self.toasts.set_bottom(16)
+        motion.fade(self.onboarding, False)
+
+    def _escape(self) -> None:
+        if self.dialog.is_open:
+            self.dialog.cancel()
+        elif not self.onboarding_open and self.page != HOME:
+            self.go(HOME)
+
+    def _shortcut(self, page: int) -> None:
+        if not self.onboarding_open and not self.dialog.is_open:
+            self.go(page)
+
+    # First-time setup
+
+    def _finish_onboarding(self) -> None:
+        self.settings.onboarding_done = True
+        self.settings.onboarding_step = 0
+        self._schedule_save()
+        log.info("First-time setup finished")
+        self.go(HOME)
+        ready = (
+            "Loopter is ready"
+            if Target.AGAIN in self.view.saved
+            else "Loopter is ready · add Play Again any time"
+        )
+        self.toast(ready, "ok")
+        self.home.focus_start()
+
+    def _defer_onboarding(self) -> None:
+        self._schedule_save()
+        self.go(HOME)
+        self.toast("Setup saved · finish any time from Home", "info")
+        self.home.focus_start()
+
+    def _onboarding_step(self, step: int) -> None:
+        self.settings.onboarding_step = step
+        self._schedule_save()
+
+    def _recapture_in_onboarding(self, target: Target) -> None:
+        self.captures[1].reset(target)
+        self.onboarding.show_step(BUTTONS)
 
     # Session
 
-    def _own_windows(self) -> Callable[[], list[Region]] | None:
-        """LOOP's window, so scans ignore it. Called on the GUI thread; the result runs on the worker."""
+    def _own_windows(self):
+        """Loopter's window, so scans ignore it. Called on the GUI thread; the result runs on the worker."""
         if QGuiApplication.platformName() != "windows":
             return None
         hwnd = int(self.winId())
         return lambda: [rect] if (rect := win32.visible_window_rect(hwnd)) else []
 
-    def _start(self) -> None:
-        self._emergency = False
-        if self.settings.mode is Mode.DEMO and not (self.demo_window and self.demo_window.isVisible()):
-            self._show_demo_target()
-            # Let the new window settle at its final position before the first scan.
-            QTimer.singleShot(DEMO_START_DELAY_MS, self.controller.start)
+    def start_session(self) -> None:
+        if Target.PLAY not in self.view.saved:
+            self.show_onboarding(max(self.settings.onboarding_step, BUTTONS))
             return
         self.controller.start()
+        if self.controller.state is SessionState.RUNNING:
+            auto = self.view.mode is Mode.INTERACTION
+            self.toast("Auto click started" if auto else "Watching started", "ok")
+
+    def stop_session(self) -> None:
+        total = self.controller.elapsed()
+        self.controller.stop()
+        self.toast(f"Session ended · {short_clock(total)}", "info")
 
     def _on_state(self, state: SessionState) -> None:
-        error = self.controller.last_error if state is SessionState.ERROR else ""
-        active = state in (SessionState.RUNNING, SessionState.PAUSED)
-        self.session.set_state(state, error, self._emergency)
-        if state is SessionState.ERROR and not self._viewing_activity():
-            self.settings_button.set_badge(theme.ERR)
-        self.settings_view.set_editable(not active)
-        self.session.set_elapsed(self.controller.elapsed())
+        view = self.view
+        view.session = state
+        view.error = self.controller.last_error if state is SessionState.ERROR else ""
         if state is SessionState.RUNNING:
+            view.emergency = False
             self._elapsed_timer.start()
         else:
             self._elapsed_timer.stop()
+        if not view.active:
+            view.screen = ""
+            view.flash = ""
+        view.elapsed = self.controller.elapsed()
+        if state is SessionState.ERROR and self.page != ACTIVITY:
+            self.tabs.set_flag(ACTIVITY, "error")
+        self.render()
 
-    # Modes and settings
+    def _on_stats(self, stats: SessionStats) -> None:
+        self.view.stats = stats
+        self.home.render(self.view)
 
-    def _select_mode(self, mode: Mode) -> None:
-        if mode is self.settings.mode:
+    def _tick(self) -> None:
+        self.view.elapsed = self.controller.elapsed()
+        self.home.render(self.view)
+        self._update_title()
+
+    def _on_observed(self, observation: Observation) -> None:
+        screen = observation.screen
+        name = screen.label if screen is not Screen.UNKNOWN else ""
+        if name == self.view.screen:
             return
-        if mode is Mode.INTERACTION and not confirm_live_interaction(self, self.settings.emergency_hotkey):
-            self.session.set_mode(self.settings.mode)
-            log.info("Live Interaction was not enabled")
-            return
-        self._set_mode(mode)
+        self.view.screen = name
+        target = {Screen.LOBBY: Target.PLAY, Screen.RESULTS: Target.AGAIN}.get(screen)
+        if target is not None and observation.match is not None:
+            if self.view.mode is Mode.INTERACTION:
+                self.view.flash = f"{target.label} is on screen. Clicking once it's safe."
+            else:
+                self.view.flash = f"{target.label} is on screen. Nothing is clicked."
+            self._flash_timer.start()
+            self.home.dot.blip()
+        self.home.render(self.view)
 
-    def _set_mode(self, mode: Mode, announce: bool = True) -> None:
+    def _clear_flash(self) -> None:
+        self.view.flash = ""
+        self.home.render(self.view)
+
+    def _on_record(self, timestamp: str, level: str, message: str) -> None:
+        entry = self.activity.append(timestamp, level, message)
+        if entry.kind in ("warn", "error") and self.page != ACTIVITY and self.tabs.flag(ACTIVITY) != "error":
+            self.tabs.set_flag(ACTIVITY, entry.kind)
+        if entry.kind == "click":
+            self.home.dot.blip()
+
+    # Modes
+
+    def pick_mode(self, mode: Mode) -> None:
+        if mode is self.view.mode or self.view.active:
+            return
+        if mode is Mode.INTERACTION:
+            self.dialog.open(self.settings.emergency_hotkey)
+            return
+        self._set_mode(Mode.LIVE)
+        self.toast("Watch only · nothing will be clicked", "info")
+
+    def _auto_click_confirmed(self) -> None:
+        self.view.emergency = False
+        self._set_mode(Mode.INTERACTION)
+        self.toast(f"Auto click is on · {self.settings.emergency_hotkey} stops it", "warn")
+        self.home.modes.option(Mode.INTERACTION).setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _auto_click_declined(self) -> None:
+        log.info("Auto click was not turned on")
+        self.home.modes.option(self.view.mode).setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _set_mode(self, mode: Mode) -> None:
         self.settings.mode = mode
-        if mode is not Mode.DEMO and self.demo_window is not None:
-            self.demo_window.hide()
-        self.session.set_mode(mode)
-        self.session.set_stats(self.controller.stats)
-        self._refresh_region()
-        if announce:
-            level = logging.WARNING if mode is Mode.INTERACTION else logging.INFO
-            log.log(level, "Mode set to %s", mode.label)
-            self._schedule_save()
+        self.view.mode = mode
+        level = logging.WARNING if mode is Mode.INTERACTION else logging.INFO
+        suffix = " (confirmed)" if mode is Mode.INTERACTION else ""
+        log.log(level, "Mode set to %s%s", mode.label, suffix)
+        self._schedule_save()
+        self.render()
+
+    # Buttons and checks
+
+    def display(self) -> Display | None:
+        return screenshot.display_for(self.settings.monitor, self.displays)
+
+    def _on_saved(self, target: Target | Screen, card: CaptureCard) -> None:
+        if isinstance(target, Target):
+            self.view.checks.reset(target)  # a new picture has not been recognized yet
+        self._templates_changed()
+        if card is self.captures[0]:
+            label = target.label if isinstance(target, Target) else f"{target.label} screen"
+            self.toast(f"{label} saved", "ok")
+
+    def _on_checked(self, outcome: CheckOutcome) -> None:
+        for target, verdict in outcome.results.items():
+            if target in self.view.saved:
+                self.view.checks.statuses[target] = verdict
+        self.render()
+
+    def _templates_changed(self) -> None:
+        self._schedule_save()
+        self._refresh_saved()
+
+    def _log_templates(self) -> None:
+        groups, problems = self.library.load()
+        for problem in problems:
+            log.warning(problem)
+        names = [f"{screen.label} · {t.name}" for screen, group in groups.items() for t in group]
+        log.info("Loaded %d saved button(s): %s", len(names), ", ".join(names) or "none")
+
+    # Settings
 
     def _update(self, **changes: object) -> None:
         for name, value in changes.items():
             setattr(self.settings, name, value)
         self._schedule_save()
 
+    def _pick_display(self, number: int) -> None:
+        if number == self.settings.monitor or self.view.active:
+            return
+        self.settings.monitor = number
+        self._schedule_save()
+        self.settings_page.set_displays(self.displays)
+        self.onboarding.set_displays(self.displays, number)
+        if not self.onboarding_open:
+            self.toast(f"Using Display {number}", "ok")
+        self.render()
+
+    def _set_reduce_motion(self, reduced: bool) -> None:
+        self.settings.reduce_motion = reduced
+        motion.settings().set_user_preference(reduced)
+        self._schedule_save()
+        self.toast("Reduced motion on" if reduced else "Reduced motion off", "info")
+
     def _set_region(self, region: Region | None) -> None:
         self.settings.region = region
-        self._refresh_region()
-        log.info("Scan region %s", f"set to {region.describe()}" if region else "cleared")
+        log.info("Scan area %s", f"set to {region.describe()}" if region else "cleared")
+        self.toast("Scan area set" if region else "Scanning the whole display", "ok")
         self._schedule_save()
+        self.render()
 
-    def _refresh_region(self) -> None:
-        region = self.settings.region
-        valid = True
-        if region is not None:
-            try:
-                display_for(region, list_monitors())
-            except CaptureError:
-                valid = False
-        self.settings_view.show_region(region, valid)
-        self.setup.refresh_overlay()
-        self._refresh_profile()
-
-    def _monitor_changed(self, other: SetupView | SettingsView) -> None:
-        other.refresh_monitors()
-        self._schedule_save()
-
-    def _templates_changed(self) -> None:
-        self.setup.refresh_templates()
-        self.settings_view.refresh_templates()
-        self._refresh_profile()
-        self._schedule_save()
-
-    def _refresh_profile(self) -> None:
-        buttons = self.library.usable_buttons()
-        self.session.set_profile(buttons, self.settings.region is not None)
-        missing = [b.label for b in Button if b not in buttons]
-        count = len(self.library.entries)
-        summary = f"{count} template(s). " + (
-            f"No {', '.join(missing)} template." if missing else "All buttons set up."
+    def _import_profile(self) -> None:
+        file, _ = QFileDialog.getOpenFileName(
+            self, "Import a button profile", "", f"Loopter profile ({PROFILE_FILE})"
         )
-        self.settings_view.show_profile(summary)
+        if file:
+            self.import_profile(Path(file))
 
-    def _set_demo_clicks(self, enabled: bool) -> None:
-        self.settings.demo_clicks_enabled = enabled
-        log.info("Demo clicks %s", "allowed" if enabled else "off")
-        self._schedule_save()
+    def import_profile(self, path: Path) -> None:
+        try:
+            added, problems = self.library.import_profile(path)
+        except (TemplateError, OSError) as exc:
+            log.error("Import failed: %s", exc)
+            self.toast(f"Couldn't import: {exc}", "err")
+            return
+        for problem in problems:
+            log.warning("Profile import: %s", problem)
+        for entry in added:
+            log.info("Imported the '%s' picture (%s)", entry.label, Path(entry.path).stem)
+            if entry.button is not None:
+                for target in Target:
+                    if entry.button in target.buttons:
+                        self.view.checks.reset(target)
+        self._templates_changed()
+        skipped = f" · {len(problems)} skipped" if problems else ""
+        self.toast(f"Imported {len(added)} button(s){skipped}", "ok" if added and not problems else "warn")
+
+    def _export_profile(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Export your buttons to an empty folder")
+        if folder:
+            self.export_profile(Path(folder))
+
+    def export_profile(self, folder: Path) -> None:
+        try:
+            count = self.library.export_profile(folder)
+        except (TemplateError, OSError) as exc:
+            log.error("Profile export failed: %s", exc)
+            self.toast(f"Export failed: {exc}", "err")
+            return
+        log.info("Exported %d button(s) to %s", count, folder)
+        self.toast(f"Exported {count} button(s)", "ok")
 
     def _schedule_save(self) -> None:
         self._save_timer.start()
@@ -308,13 +622,6 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             log.error("Settings could not be saved: %s", exc)
 
-    def _log_templates(self) -> None:
-        groups, problems = self.library.load()
-        for problem in problems:
-            log.warning(problem)
-        names = [f"{screen.label} · {t.name}" for screen, group in groups.items() for t in group]
-        log.info("Loaded %d template(s): %s", len(names), ", ".join(names) or "none")
-
     # Emergency stop
 
     def _register_hotkey(self, text: str) -> str:
@@ -322,22 +629,27 @@ class MainWindow(QMainWindow):
         try:
             self.hotkey.register(text)
         except HotkeyError as exc:
-            self.settings_view.show_hotkey(text, False, str(exc))
             log.error("Emergency stop shortcut unavailable: %s", exc)
+            self.settings_page.show_hotkey_problem(str(exc))
             return str(exc)
-        self.settings_view.show_hotkey(
-            text, True, "Works while LOOP is in the background. Stops and disarms all."
-        )
+        self.settings_page.show_hotkey_problem("")
         return ""
 
-    def _apply_hotkey(self, text: str) -> None:
+    def apply_hotkey(self, text: str) -> None:
         previous = self.settings.emergency_hotkey
+        if text == previous:
+            return
         error = self._register_hotkey(text)
         if not error:
             self._update(emergency_hotkey=text)
+            self.view.hotkey = text
             log.info("Emergency stop shortcut set to %s", text)
-        elif previous != text and not self._register_hotkey(previous):
-            self.settings_view.show_hotkey(previous, True, f"{error} Still using {previous}.")
+            self.toast(f"Emergency stop is now {text}", "ok")
+        else:
+            self._register_hotkey(previous)
+            self.settings_page.show_hotkey_problem(f"{error} Still using {previous}.")
+            self.toast(f"{text} is unavailable · still using {previous}", "warn")
+        self.render()
 
     def _on_hotkey_pressed(self) -> None:
         # Runs on the hotkey thread: disarm first so no click can slip through
@@ -346,26 +658,16 @@ class MainWindow(QMainWindow):
         self.emergency_triggered.emit()
 
     def _on_emergency(self) -> None:
-        self._emergency = True
+        was_active = self.view.active
         self.controller.emergency_stop()
-        self.settings.demo_clicks_enabled = False
-        self.settings_view.set_demo_clicks(False)
-        if self.settings.mode is Mode.INTERACTION:
+        self.view.emergency = True
+        if self.view.mode is Mode.INTERACTION:
             self._set_mode(Mode.LIVE)
-        self.session.set_state(self.controller.state, emergency=True)
-        self._schedule_save()
-
-    # Demo target
-
-    def _show_demo_target(self) -> None:
-        if self.demo_window is None:
-            self.demo_window = DemoTargetWindow(self.guard)
-            self.demo_window.setWindowIcon(self.windowIcon())
-            available = self.screen().availableGeometry()
-            width = SCREEN_SIZE[0] / self.devicePixelRatioF()
-            self.demo_window.move(round(available.right() - width - 40), available.top() + 60)
-        self.demo_window.show()
-        self.demo_window.raise_()
+        self.render()
+        if was_active:
+            self.toast("Emergency stop · clicks are off", "err")
+        else:
+            self.toast("Emergency stop · nothing was running", "info")
 
     # Displays
 
@@ -376,47 +678,44 @@ class MainWindow(QMainWindow):
 
     def _on_displays_changed(self) -> None:
         log.info("Display configuration changed")
-        self.setup.refresh_monitors()
-        self.settings_view.refresh_monitors()
-        self._refresh_region()
+        self.displays = screenshot.list_displays()
+        self.settings_page.set_displays(self.displays)
+        self.onboarding.set_displays(self.displays, self.settings.monitor)
+        self.render()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         self.controller.shutdown()
         self.hotkey.unregister()
-        if self.demo_window is not None:
-            self.demo_window.close()
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         self._save_timer.stop()
         self._save()
         super().closeEvent(event)
 
 
-def _page(back: QWidget, heading: QWidget, body: QWidget) -> QWidget:
-    """A secondary view: a back button and heading above the view's own content."""
-    head = QWidget()
-    head.setObjectName("ViewHead")
-    head.setLayout(row(back, heading, None, margins=(8, 8, 16, 8)))
-    line = QFrame()
-    line.setFixedHeight(1)
-    line.setStyleSheet(f"background: {theme.LINE};")
-    page = QWidget()
-    page.setObjectName("View")
-    layout = QVBoxLayout(page)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(0)
-    layout.addWidget(head)
-    layout.addWidget(line)
-    layout.addWidget(body, 1)
-    return page
+def _tint_title_bar(hwnd: int) -> None:
+    """Gives the native Windows 11 title bar the window's dark color (ignored elsewhere)."""
+    if not win32.IS_WINDOWS or QGuiApplication.platformName() != "windows":
+        return
+    dark_mode, border_color, caption_color, text_color = 20, 34, 35, 36  # DWMWINDOWATTRIBUTE values
 
+    def colorref(hex_color: str) -> ctypes.c_uint:
+        r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
+        return ctypes.c_uint(r | g << 8 | b << 16)
 
-def _scrolling(widget: QWidget) -> QScrollArea:
-    scroll = QScrollArea()
-    scroll.setWidget(widget)
-    scroll.setWidgetResizable(True)
-    scroll.setFrameShape(QFrame.Shape.NoFrame)
-    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    return scroll
+    try:
+        dwm = ctypes.windll.dwmapi
+        values = (
+            (dark_mode, ctypes.c_uint(1)),
+            (border_color, colorref(theme.BORDER)),
+            (caption_color, colorref(theme.BG)),
+            (text_color, colorref(theme.TEXT)),
+        )
+        for attribute, value in values:
+            dwm.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd), attribute, ctypes.byref(value), ctypes.sizeof(value)
+            )
+    except (AttributeError, OSError):
+        pass
 
 
 def _open_folder(path: Path) -> None:

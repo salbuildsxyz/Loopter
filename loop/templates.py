@@ -48,6 +48,25 @@ class TemplateLibrary:
         write_image(path, image_bgr)
         return self._add(replace(entry, path=str(path)))
 
+    def replace_image(
+        self, image_bgr: np.ndarray, button: Button, source_height: int | None
+    ) -> TemplateEntry:
+        """Saves a new picture of `button`, replacing any saved before. Raises TemplateError if unusable.
+
+        If the new picture is rejected, the earlier ones are kept.
+        """
+        before = list(self.entries)
+        replaced = [e for e in self.entries if e.button is button]
+        self.entries[:] = [e for e in self.entries if e.button is not button]
+        try:
+            entry = self.add_image(image_bgr, button.screen, source_height, button)
+        except (TemplateError, OSError):
+            self.entries[:] = before
+            raise
+        for old in replaced:
+            self._delete_file(old)
+        return entry
+
     def import_file(self, source: Path, screen: Screen, button: Button | None = None) -> TemplateEntry:
         """Copies an image into the library so later edits to the original do not affect matching.
 
@@ -63,9 +82,7 @@ class TemplateLibrary:
     def remove(self, entry: TemplateEntry) -> None:
         """Removes a template from the list; deletes the file only if LOOP created it."""
         self.entries.remove(entry)
-        file = Path(entry.path)
-        if file.parent.resolve() == self.directory.resolve():
-            file.unlink(missing_ok=True)
+        self._delete_file(entry)
 
     def status(self, entry: TemplateEntry) -> tuple[bool, str]:
         """Whether the template is usable, with its size or the reason it is not."""
@@ -166,6 +183,11 @@ class TemplateLibrary:
                     "or remove the other template if that one was saved for the wrong screen."
                 )
 
+    def _delete_file(self, entry: TemplateEntry) -> None:
+        file = Path(entry.path)
+        if file.parent.resolve() == self.directory.resolve():
+            file.unlink(missing_ok=True)
+
     def _add(self, entry: TemplateEntry) -> TemplateEntry:
         self.entries.append(entry)
         return entry
@@ -192,5 +214,5 @@ def _conflict_message(a: TemplateEntry, b: TemplateEntry) -> str:
     return (
         f"The '{a.label}' template '{Path(a.path).stem}' ({a.screen.label}) and the '{b.label}' template "
         f"'{Path(b.path).stem}' ({b.screen.label}) show the same thing. One of them was saved for the "
-        "wrong screen; remove it in Settings."
+        "wrong screen; recapture or remove it in Setup."
     )

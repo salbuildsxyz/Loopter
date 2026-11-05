@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 from loop.capture import Region
-from loop.demo.scenario import DemoScenario
 from loop.suggest import find_buttons
+from tests.simulation.scenario import DemoScenario
 
 
 def close_to(found: Region, expected: Region, tolerance: int) -> bool:

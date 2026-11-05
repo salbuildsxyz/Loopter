@@ -73,7 +73,7 @@ def test_live_click_in_foreground_window():
 def test_live_never_clicks_loop_itself():
     guard, clicks = live_guard(window=LOOP_HWND, foreground=LOOP_HWND)
     guard.arm()
-    with pytest.raises(InputDeferred, match="LOOP is in the foreground"):
+    with pytest.raises(InputDeferred, match="Loopter is in the foreground"):
         guard.click(300, 250)
     assert clicks == []
 

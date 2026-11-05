@@ -1,4 +1,4 @@
-"""A local window that plays the demo scenario. It is the only place LOOP may click."""
+"""A real window showing the simulated game, for the desktop tests. The only place they click."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from PySide6.QtWidgets import QWidget
 
 from loop import win32
 from loop.capture import Region
-from loop.demo import SCREEN_SIZE
-from loop.demo.scenario import DemoScenario
 from loop.input_guard import ClickTarget, InputGuard
 from loop.ui import theme
 from loop.ui.widgets import bgr_to_qimage
+from tests.simulation import SCREEN_SIZE
+from tests.simulation.scenario import DemoScenario
 
 
 class DemoTargetWindow(QWidget):
@@ -100,6 +100,6 @@ class DemoTargetWindow(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(theme.BG_0))
+        painter.fillRect(self.rect(), QColor(theme.BG))
         self._pixmap.setDevicePixelRatio(self.devicePixelRatioF())
         painter.drawPixmap(0, 0, self._pixmap)

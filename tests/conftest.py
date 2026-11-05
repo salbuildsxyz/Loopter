@@ -20,9 +20,9 @@ if not DESKTOP_TESTS:
 
 from loop import input_guard  # noqa: E402 - must follow the platform choice above
 from loop.capture import Region  # noqa: E402
-from loop.demo import SCREEN_SIZE, demo_templates  # noqa: E402
-from loop.demo.scenario import DemoScenario  # noqa: E402
 from loop.input_guard import ClickTarget, InputGuard  # noqa: E402
+from tests.simulation import SCREEN_SIZE, demo_templates  # noqa: E402
+from tests.simulation.scenario import DemoScenario  # noqa: E402
 
 DEMO_ORIGIN = Region(200, 150, *SCREEN_SIZE)
 DEMO_HWND = 0xBEEF

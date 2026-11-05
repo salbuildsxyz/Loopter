@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 
 from loop.capture import Region
-from loop.demo import SCREENS_DIR, demo_template_path
 from loop.matcher import (
     TemplateError,
     colors_match,
@@ -19,6 +18,7 @@ from loop.matcher import (
     write_image,
 )
 from loop.screens import Screen
+from tests.simulation import SCREENS_DIR, demo_template_path
 
 
 def compose(screen: str, button: Screen, x: int, y: int) -> np.ndarray:

@@ -11,11 +11,11 @@ import cv2
 import numpy as np
 import pytest
 
-from loop.demo import SCREEN_SIZE
-from loop.demo.scenario import DemoScenario
 from loop.policy import ActionPolicy, EventKind
 from loop.recognizer import Recognizer
 from loop.screens import ACTIONABLE, Screen
+from tests.simulation import SCREEN_SIZE
+from tests.simulation.scenario import DemoScenario
 
 THRESHOLD = 0.85
 SCANS_PER_TIMED_SCREEN = 4

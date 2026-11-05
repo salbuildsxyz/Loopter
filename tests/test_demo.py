@@ -14,12 +14,12 @@ from PySide6.QtCore import QTimer
 
 from loop.capture import Region
 from loop.controller import SessionController
-from loop.demo.scenario import BUTTON_AREAS
 from loop.input_guard import ClickTarget, InputGuard
 from loop.screens import ACTIONABLE, Screen
 from loop.state import SessionState
 from loop.worker import ScanPlan
 from tests.conftest import DEMO_ORIGIN, GAME_HWND, LOOP_HWND, FakeDesktop, ScenarioCapture
+from tests.simulation.scenario import BUTTON_AREAS
 
 # Lobby → Matchmaking → Loading → Match → Results → Finding Next Match → the next match.
 WORKFLOW = [
@@ -283,13 +283,13 @@ class TestLiveInteraction:
         caplog.set_level(logging.INFO)
         game.foreground = LOOP_HWND
         with Session(self.live_plan(templates), guard, scenario) as session:
-            qtbot.waitUntil(lambda: "LOOP is in the foreground" in caplog.text, timeout=3000)
+            qtbot.waitUntil(lambda: "Loopter is in the foreground" in caplog.text, timeout=3000)
             qtbot.wait(200)
             assert mouse.clicks == []
             assert session.stats.errors == 0
             game.foreground = GAME_HWND
             qtbot.waitUntil(lambda: session.stats.interactions >= 1, timeout=5000)
-        assert caplog.text.count("LOOP is in the foreground") == 1  # reported once, not every scan
+        assert caplog.text.count("Loopter is in the foreground") == 1  # reported once, not every scan
 
     def test_waits_while_user_is_active(self, qtbot, caplog, scenario, game, guard, mouse, templates):
         caplog.set_level(logging.INFO)

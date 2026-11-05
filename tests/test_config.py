@@ -21,9 +21,10 @@ def test_round_trip(tmp_path):
             TemplateEntry("C:/t/b.png", Screen.LOADING),
         ],
         actions={Screen.LOBBY},
-        demo_clicks_enabled=True,
         emergency_hotkey="Ctrl+Alt+End",
-        log_expanded=False,
+        onboarding_done=True,
+        onboarding_step=2,
+        reduce_motion=True,
     )
     save_settings(original, path)
     assert load_settings(path) == original
@@ -31,9 +32,23 @@ def test_round_trip(tmp_path):
 
 def test_defaults():
     s = Settings()
-    assert s.mode is Mode.DEMO
+    assert s.mode is Mode.LIVE
     assert s.actions == set(ACTIONABLE)
-    assert s.demo_clicks_enabled is False
+    assert (s.onboarding_done, s.onboarding_step, s.reduce_motion) == (False, 0, False)
+
+
+def test_saved_demo_mode_opens_as_watch_only(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"mode": "demo"}))
+    assert load_settings(path).mode is Mode.LIVE
+
+
+def test_onboarding_step_is_clamped(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"onboarding_step": 42, "onboarding_done": "yes", "reduce_motion": 1}))
+    s = load_settings(path)
+    assert s.onboarding_step == 4
+    assert s.onboarding_done is False and s.reduce_motion is False
 
 
 def test_live_interaction_is_never_restored(tmp_path):
@@ -75,20 +90,18 @@ def test_wrong_types_fall_back_per_field(tmp_path):
                     None,
                 ],
                 "actions": ["lobby", "loading", "continue", "nonsense"],
-                "demo_clicks_enabled": "yes",
                 "emergency_hotkey": "",
             }
         )
     )
     s = load_settings(path)
     defaults = Settings()
-    assert s.mode is Mode.DEMO
+    assert s.mode is Mode.LIVE
     assert s.threshold == defaults.threshold
     assert s.scan_interval_ms == defaults.scan_interval_ms
     assert s.region is None
     assert s.templates == [TemplateEntry("ok.png", Screen.RESULTS, 1440)]
     assert s.actions == {Screen.LOBBY}  # loading has no button; nonsense is ignored
-    assert s.demo_clicks_enabled is False
     assert s.emergency_hotkey == defaults.emergency_hotkey
 
 
@@ -107,7 +120,7 @@ def test_unhashable_values_are_ignored(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({"mode": ["live"], "actions": [["lobby"], {"x": 1}, "results"]}))
     s = load_settings(path)
-    assert s.mode is Mode.DEMO
+    assert s.mode is Mode.LIVE
     assert s.actions == {Screen.RESULTS}
 
 

@@ -6,11 +6,11 @@ import pytest
 
 from loop import win32
 from loop.capture import Region, ScreenCapture
-from loop.demo import SCREEN_SIZE, demo_templates
-from loop.demo.target_window import DemoTargetWindow
 from loop.input_guard import InputGuard
 from loop.recognizer import Recognizer
 from loop.screens import Screen
+from tests.simulation import SCREEN_SIZE, demo_templates
+from tests.simulation.target_window import DemoTargetWindow
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Win32 only")
 

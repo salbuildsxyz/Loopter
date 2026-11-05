@@ -30,6 +30,9 @@ desktop.ini
 # Private game screenshots, button crops, and design drafts: never publish
 assests/
 screenshots/
+.design/
+newindex.html
+legacy_ui_backup/
 
 # Release archives and local tool settings
 *.zip

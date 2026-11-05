@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "loop-monitor"
 dynamic = ["version"]
-description = "Screen-based UI recognition and session monitoring for Windows, with a safe local demo environment."
+description = "Loopter: screen-based UI recognition and session monitoring for Windows."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -39,7 +39,7 @@ version = { attr = "loop.__version__" }
 include = ["loop*"]
 
 [tool.setuptools.package-data]
-loop = ["assets/*.png", "assets/*.ico", "assets/demo/*/*.png"]
+loop = ["assets/*.png", "assets/*.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -10,7 +10,6 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from loop.capture import CaptureError, Region, ScreenCapture, display_for, list_monitors
 from loop.config import Mode, Settings, templates_dir
-from loop.demo import SCREEN_SIZE, demo_templates
 from loop.input_guard import ClickTarget, InputGuard
 from loop.policy import MAX_ATTEMPTS, Event, EventKind
 from loop.recognizer import Observation
@@ -28,13 +27,12 @@ class SetupError(Exception):
 
 def build_plan(
     settings: Settings,
-    guard: InputGuard,
     monitors: list[Region] | None = None,
     own_windows: Callable[[], list[Region]] | None = None,
 ) -> ScanPlan:
     """Turns settings into a scan plan, or raises SetupError with a message for the user.
 
-    Without a scan region, live modes scan the whole selected display. `own_windows`
+    Without a scan region, the whole selected display is scanned. `own_windows`
     lists LOOP's windows, which are blanked out of every capture so LOOP never
     recognizes its own screenshot preview.
     """
@@ -43,18 +41,6 @@ def build_plan(
         "interval_s": settings.scan_interval_ms / 1000,
         "cooldown_s": settings.cooldown_s,
     }
-    if settings.mode is Mode.DEMO:
-        if guard.target is None:
-            raise SetupError("The demo target window is not open")
-        actions = frozenset(settings.actions) if settings.demo_clicks_enabled else frozenset()
-        return ScanPlan(
-            templates=demo_templates(),
-            region=lambda: target.region if (target := guard.target) else None,
-            display_height=SCREEN_SIZE[1],
-            actions=actions,
-            **common,
-        )
-
     try:
         monitors = monitors if monitors is not None else list_monitors()
         region = settings.region or _whole_display(settings.monitor, monitors)
@@ -64,14 +50,14 @@ def build_plan(
     templates = _load_user_templates(settings)
     common |= {"region": lambda: region, "display_height": display.height, "masked": own_windows}
     if settings.mode is Mode.LIVE:
-        # Live Monitor never interacts, regardless of any other setting.
+        # Watch only never interacts, regardless of any other setting.
         return ScanPlan(templates=templates, **common)
 
     actions = frozenset(settings.actions)
     if not actions & templates.keys():
         raise SetupError(
-            "Live Interaction has nothing it could press. Save a Play or Ready template (Lobby) or a "
-            "Play Again template (Results) in Setup, and enable it in Settings."
+            "Auto click has nothing it could press. Save your Play or Ready button (lobby) or your "
+            "Play Again button (results) in Setup, and turn it on in Settings."
         )
     for screen in sorted(actions - templates.keys(), key=lambda s: s.value):
         log.warning("No usable template for '%s'; that action cannot trigger", ACTION_LABELS[screen])
@@ -96,8 +82,8 @@ def _load_user_templates(settings: Settings) -> dict[Screen, tuple]:
         log.warning("Skipping template: %s", problem)
     if not groups:
         raise SetupError(
-            "No usable templates. Open Setup, capture the lobby or the results screen, "
-            "and save the button LOOP finds."
+            "No buttons are set up yet. Open Setup, capture your game's lobby or results screen, "
+            "and save the button Loopter finds."
         )
     conflicts = library.conflicts()
     if conflicts:

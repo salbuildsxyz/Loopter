@@ -1,20 +1,19 @@
-"""Regenerates the bundled demo fixtures and app icon. All artwork is drawn here from scratch.
+"""Regenerates the test fixtures (a simulated game) and the app icon. All artwork is drawn here from scratch.
 
 The screens mirror the states of a typical battle royale loop (lobby, matchmaking,
 loading, match, results, finding the next match) with generic, original artwork.
 Decoys with similar colors or text sit beside the real buttons so tests can prove
 LOOP never confuses them.
 
-Usage: python scripts/generate_assets.py
+Usage: python scripts/generate_assets.py [fixtures] [icon]
 """
 
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QByteArray, QRectF, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -23,11 +22,12 @@ from PySide6.QtGui import (
     QLinearGradient,
     QPainter,
     QPen,
-    QPolygonF,
 )
+from PySide6.QtSvg import QSvgRenderer
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "loop" / "assets"
+SIMULATION = ROOT / "tests" / "simulation" / "images"
 W, H = 960, 540
 
 BG = QColor("#15161B")
@@ -47,7 +47,7 @@ PROMO_BG = QColor("#5B6FD8")
 SPECTATE_BG = QColor("#5B9BD0")
 SPECTATE_BAR = QColor("#1A2140")
 
-# Kept in sync with BUTTON_AREAS in loop/demo/scenario.py: decoys stay outside these areas.
+# Kept in sync with BUTTON_AREAS in tests/simulation/scenario.py: decoys stay outside these areas.
 LOBBY_BUTTON_AREA = (52, 404, 256, 96)
 
 
@@ -147,7 +147,7 @@ def templates() -> dict[str, QImage]:
         ),
         "loading": loading_badge(),
     }
-    out = ASSETS / "demo" / "templates"
+    out = SIMULATION / "templates"
     out.mkdir(parents=True, exist_ok=True)
     for name, image in images.items():
         if not image.save(str(out / f"{name}.png")):
@@ -253,7 +253,7 @@ def spectating(sprites: dict[str, QImage]) -> tuple[QImage, QPainter]:
 
 
 def screens(sprites: dict[str, QImage]) -> None:
-    out = ASSETS / "demo" / "screens"
+    out = SIMULATION / "screens"
 
     save(*lobby(sprites, matchmaking=False), out / "lobby.png")
     save(*lobby(sprites, matchmaking=True), out / "matchmaking.png")
@@ -286,33 +286,20 @@ def screens(sprites: dict[str, QImage]) -> None:
 
 
 def icon() -> None:
+    """The app icon: the design's loop mark in the accent color on a dark tile."""
     image = QImage(256, 256, QImage.Format.Format_ARGB32)
     image.fill(Qt.GlobalColor.transparent)
     p = QPainter(image)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor("#181A1F"))
-    p.drawRoundedRect(QRectF(8, 8, 240, 240), 52, 52)
-    # A clockwise arc with an arrowhead: the "loop".
-    center, radius, start, span = QPointF(128, 128), 64, 90, -290
-    p.setPen(QPen(ACCENT, 24, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawArc(QRectF(64, 64, 128, 128), start * 16, span * 16)
-    end = math.radians(start + span)
-    tip = QPointF(center.x() + radius * math.cos(end), center.y() - radius * math.sin(end))
-    tangent = QPointF(math.sin(end), math.cos(end))  # clockwise direction of travel
-    normal = QPointF(math.cos(end), -math.sin(end))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(ACCENT)
-    p.drawPolygon(
-        QPolygonF(
-            [
-                tip + tangent * 30,
-                tip + normal * 30 - tangent * 6,
-                tip - normal * 30 - tangent * 6,
-            ]
-        )
+    p.setPen(QPen(QColor("#2A2F3B"), 6))
+    p.setBrush(QColor("#12151C"))
+    p.drawRoundedRect(QRectF(11, 11, 234, 234), 62, 62)
+    mark = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8B8CFF" '
+        'stroke-width="2" stroke-linecap="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/>'
+        '<circle cx="19.5" cy="12" r="1.6" fill="#8B8CFF" stroke="none"/></svg>'
     )
+    QSvgRenderer(QByteArray(mark.encode())).render(p, QRectF(48, 48, 160, 160))
     p.end()
     for name in ("loop.png", "loop.ico"):
         if not image.save(str(ASSETS / name)):
@@ -321,9 +308,13 @@ def icon() -> None:
 
 
 def main() -> None:
-    app = QGuiApplication(sys.argv)  # noqa: F841 - text rendering needs the platform font database
-    screens(templates())
-    icon()
+    """Regenerates everything, or only the parts named: `fixtures`, `icon`."""
+    parts = sys.argv[1:] or ["fixtures", "icon"]
+    app = QGuiApplication(sys.argv[:1])  # noqa: F841 - text rendering needs the platform font database
+    if "fixtures" in parts:
+        screens(templates())
+    if "icon" in parts:
+        icon()
 
 
 if __name__ == "__main__":

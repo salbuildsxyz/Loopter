@@ -6,10 +6,10 @@ import numpy as np
 import pytest
 
 from loop.config import TemplateEntry
-from loop.demo import TEMPLATES_DIR, demo_template_path
 from loop.matcher import TemplateError, read_image
 from loop.screens import Button, Screen
 from loop.templates import PROFILE_FILE, TemplateLibrary
+from tests.simulation import TEMPLATES_DIR, demo_template_path
 
 
 @pytest.fixture
@@ -202,3 +202,20 @@ def test_profile_import_rejects_other_files(library, tmp_path):
     bad.write_text("[1, 2]")
     with pytest.raises(TemplateError, match="not a LOOP profile"):
         library.import_profile(bad)
+
+
+def test_replacing_a_button_keeps_one_picture_of_it(library):
+    first = library.replace_image(image("play.png"), Button.PLAY, 540)
+    library.add_image(image("ready.png"), Screen.LOBBY, 540, Button.READY)
+    second = library.replace_image(image("play.png")[2:-2, 2:-2], Button.PLAY, 540)
+    assert [e.button for e in library.entries] == [Button.READY, Button.PLAY]
+    assert library.entries[-1] == second
+    assert not Path(first.path).exists()  # the old picture's file is removed too
+
+
+def test_a_rejected_replacement_keeps_the_earlier_picture(library):
+    first = library.replace_image(image("play.png"), Button.PLAY, 540)
+    flat = np.full((40, 120, 3), 200, np.uint8)
+    with pytest.raises(TemplateError):
+        library.replace_image(flat, Button.PLAY, 540)
+    assert library.entries == [first] and Path(first.path).exists()

@@ -1,7 +1,7 @@
 """The only path through which LOOP sends mouse input.
 
 A click is refused unless the guard is armed and the point lies inside the click
-target. For the demo target, that window must be on top at the point. For live
+target. For a specific target window, that window must be on top at the point. For live
 interaction, the point must be in the foreground window (never LOOP itself) and
 the user must not have used the mouse or keyboard in the last few seconds.
 The emergency stop disarms the guard from any thread, effective immediately.
@@ -112,10 +112,10 @@ class InputGuard:
         window = self._desktop.window_at(x, y)
         if target.window:
             if window != target.window:
-                raise InputDeferred("Another window is covering the demo target; click postponed")
+                raise InputDeferred("Another window is covering the target window; click postponed")
             return
         foreground = self._desktop.foreground_window()
         if foreground and self._desktop.is_own_window(foreground):
-            raise InputDeferred("LOOP is in the foreground. Switch to the game window to allow clicks.")
+            raise InputDeferred("Loopter is in the foreground. Switch to the game window to allow clicks.")
         if not foreground or window != foreground:
             raise InputDeferred("The button is not in the foreground window; click postponed")

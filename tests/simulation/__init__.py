@@ -1,15 +1,17 @@
-"""Local demonstration environment built from bundled, generated screenshot fixtures."""
+"""A synthetic game used by the tests: generated menu screens and their button templates.
+
+Nothing here ships with the app. The images are drawn by scripts/generate_assets.py.
+"""
 
 from dataclasses import replace
 from pathlib import Path
 
-from loop import ASSETS_DIR
 from loop.matcher import Template, load_template
 from loop.screens import Screen
 
-DEMO_ASSETS = ASSETS_DIR / "demo"
-SCREENS_DIR = DEMO_ASSETS / "screens"
-TEMPLATES_DIR = DEMO_ASSETS / "templates"
+IMAGES = Path(__file__).resolve().parent / "images"
+SCREENS_DIR = IMAGES / "screens"
+TEMPLATES_DIR = IMAGES / "templates"
 SCREEN_SIZE = (960, 540)
 
 # Each screen's templates as (name in the log, file). The lobby shows Play, or Ready in a party.

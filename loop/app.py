@@ -9,18 +9,16 @@ from pathlib import Path
 from types import TracebackType
 
 from PySide6.QtCore import QLockFile
-from PySide6.QtGui import QFont, QFontDatabase, QIcon
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from loop import APP_NAME, ASSETS_DIR, __version__, win32
+from loop import APP_NAME, ASSETS_DIR, DISPLAY_NAME, __version__, win32
 from loop.config import app_data_dir, load_settings, logs_dir
 from loop.logging_setup import setup_logging
+from loop.ui import theme
 from loop.ui.main_window import MainWindow
-from loop.ui.theme import STYLESHEET
 
 log = logging.getLogger("loop")
-
-PREFERRED_FONTS = ("Segoe UI Variable Text", "Segoe UI")
 
 
 def _log_unhandled(kind: type[BaseException], value: BaseException, tb: TracebackType | None) -> None:
@@ -47,16 +45,13 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(DISPLAY_NAME)
     app.setApplicationVersion(__version__)
-    app.setStyle("Fusion")
-    families = set(QFontDatabase.families())
-    family = next((f for f in PREFERRED_FONTS if f in families), app.font().family())
-    app.setFont(QFont(family))
-    app.setStyleSheet(STYLESHEET)
+    theme.apply(app)
 
     lock = acquire_instance_lock(app_data_dir())
     if lock is None:
-        QMessageBox.information(None, APP_NAME, "LOOP is already running. Switch to the open window.")
+        QMessageBox.information(None, DISPLAY_NAME, "Loopter is already running. Switch to the open window.")
         return 1
 
     bridge = setup_logging(logs_dir())
@@ -67,5 +62,5 @@ def main(argv: list[str] | None = None) -> int:
     app.setWindowIcon(icon)
     window = MainWindow(settings, bridge, icon)
     window.show()
-    log.info("LOOP %s started", __version__)
+    log.info("Loopter %s started", __version__)
     return app.exec()

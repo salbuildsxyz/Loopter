@@ -12,9 +12,9 @@ from dataclasses import dataclass
 import numpy as np
 
 from loop.capture import Region
-from loop.demo import SCREENS_DIR, TEMPLATE_FILES, TEMPLATES_DIR
 from loop.matcher import read_image
 from loop.screens import ACTIONABLE, Screen
+from tests.simulation import SCREENS_DIR, TEMPLATE_FILES, TEMPLATES_DIR
 
 
 @dataclass(frozen=True)

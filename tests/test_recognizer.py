@@ -7,11 +7,11 @@ import numpy as np
 import pytest
 
 from loop.capture import Region
-from loop.demo import SCREEN_SIZE, SCREENS_DIR, demo_template_path
-from loop.demo.scenario import DEMO_SCREENS, DemoScenario
 from loop.matcher import load_template, read_image
 from loop.recognizer import MAX_WORK_HEIGHT, Recognizer
 from loop.screens import Screen
+from tests.simulation import SCREEN_SIZE, SCREENS_DIR, demo_template_path
+from tests.simulation.scenario import DEMO_SCREENS, DemoScenario
 
 THRESHOLD = 0.85
 

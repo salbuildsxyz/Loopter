@@ -23,7 +23,6 @@ DEFAULT_HOTKEY = "Ctrl+Shift+F12"
 
 
 class Mode(Enum):
-    DEMO = "demo"
     LIVE = "live"
     INTERACTION = "interaction"
 
@@ -32,7 +31,8 @@ class Mode(Enum):
         return _MODE_LABELS[self]
 
 
-_MODE_LABELS = {Mode.DEMO: "Demo", Mode.LIVE: "Live Monitor", Mode.INTERACTION: "Live Interaction"}
+_MODE_LABELS = {Mode.LIVE: "Watch only", Mode.INTERACTION: "Auto click"}
+ONBOARDING_STEPS = 5
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,7 @@ class TemplateEntry:
 
 @dataclass
 class Settings:
-    mode: Mode = Mode.DEMO
+    mode: Mode = Mode.LIVE
     threshold: float = 0.85
     scan_interval_ms: int = 750
     cooldown_s: float = 2.0
@@ -85,10 +85,11 @@ class Settings:
     monitor: int = 1
     templates: list[TemplateEntry] = field(default_factory=list)
     actions: set[Screen] = field(default_factory=lambda: set(ACTIONABLE))
-    demo_clicks_enabled: bool = False
     emergency_hotkey: str = DEFAULT_HOTKEY
-    log_expanded: bool = True
     window_geometry: str = ""
+    onboarding_done: bool = False
+    onboarding_step: int = 0  # the first-launch step to reopen while setup is unfinished
+    reduce_motion: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -117,7 +118,10 @@ class Settings:
         if isinstance(actions, list):
             allowed = {x.value for x in ACTIONABLE}
             s.actions = {Screen(a) for a in actions if isinstance(a, str) and a in allowed}
-        for name in ("demo_clicks_enabled", "log_expanded"):
+        step = data.get("onboarding_step")
+        if isinstance(step, int) and not isinstance(step, bool):
+            s.onboarding_step = min(max(step, 0), ONBOARDING_STEPS - 1)
+        for name in ("onboarding_done", "reduce_motion"):
             if isinstance(data.get(name), bool):
                 setattr(s, name, data[name])
         for name in ("emergency_hotkey", "window_geometry"):
@@ -129,13 +133,11 @@ class Settings:
 
 
 def _parse_mode(value: Any) -> Mode:
-    try:
-        mode = Mode(value) if value is not None else Mode.DEMO
-    except (TypeError, ValueError):
-        log.warning("Unknown mode %r in settings; using demo mode", value)
-        return Mode.DEMO
-    # Live Interaction must be chosen explicitly every time; it is never restored.
-    return Mode.LIVE if mode is Mode.INTERACTION else mode
+    # Auto click must be chosen explicitly every time, so it is never restored. Older versions
+    # could also save "demo", an internal test mode that no longer exists.
+    if value not in (None, "live", "interaction", "demo"):
+        log.warning("Unknown mode %r in settings; using Watch only", value)
+    return Mode.LIVE
 
 
 def _parse_templates(value: Any) -> list[TemplateEntry]:
@@ -147,7 +149,7 @@ def _parse_templates(value: Any) -> list[TemplateEntry]:
             entries.append(TemplateEntry.from_dict(item))
         except (TypeError, ValueError, KeyError):
             # Includes templates for screens older versions recognized (Continue, Skip, ...).
-            log.warning("Ignoring a template entry LOOP cannot use: %r", item)
+            log.warning("Ignoring a template entry Loopter cannot use: %r", item)
     return entries
 
 
