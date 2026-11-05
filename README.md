@@ -1,4 +1,4 @@
-# LOOP
+# LOOPTER
 
 A small Windows app that recognizes battle royale menu screens and, if you allow it, presses **Play** and **Play Again** for you.
 
@@ -15,7 +15,7 @@ A small Windows app that recognizes battle royale menu screens and, if you allow
 
 ## Download
 
-Grab `LOOP-<version>-windows.zip` from the [latest release](https://github.com/salbuildsxyz/Loop/releases/latest). The build isn't code-signed, so Windows SmartScreen may warn you the first time.
+Grab `LOOP-<version>-windows.zip` from the [latest release](https://github.com/salbuildsxyz/Loopter/releases). The build isn't code-signed, so Windows SmartScreen may warn you the first time.
 
 ## Setup
 
